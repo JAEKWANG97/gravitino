@@ -1,0 +1,122 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+import java.nio.file.Files
+
+def gitCommitTests = tasks.register('testGitCommitId') {
+  group = 'verification'
+  description = 'Checks build commit metadata for Git repositories, worktrees and submodules.'
+  onlyIf {
+    try {
+      project.exec {
+        commandLine('git', '--version')
+        standardOutput = new ByteArrayOutputStream()
+        errorOutput = new ByteArrayOutputStream()
+      }
+      true
+    } catch (Exception ignored) {
+      logger.lifecycle('Skipping Git commit metadata tests because Git is unavailable.')
+      false
+    }
+  }
+  doLast {
+    def readCommit = project.ext.getGitCommitId
+    def fixtureDir = Files.createTempDirectory('gravitino-git-commit-tests-').toFile().canonicalFile
+    def gitEnvironment = new HashMap(System.getenv()).findAll { key, value -> !key.startsWith('GIT_') }
+    def emptyConfig = new File(fixtureDir, 'empty-config')
+    emptyConfig.text = ''
+    gitEnvironment.putAll([
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_SYSTEM: emptyConfig.absolutePath,
+      GIT_CONFIG_GLOBAL: emptyConfig.absolutePath
+    ])
+    def emptyTemplate = new File(fixtureDir, 'empty-template')
+    emptyTemplate.mkdirs()
+    def git = { File directory, List arguments ->
+      def output = new ByteArrayOutputStream()
+      project.exec {
+        workingDir(directory)
+        environment = gitEnvironment
+        commandLine(['git', '-c', 'user.name=Build Test', '-c', 'user.email=build-test@example.invalid',
+                     '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=' + emptyTemplate.absolutePath,
+                     '-c', 'init.templateDir=' + emptyTemplate.absolutePath] + arguments)
+        standardOutput = output
+        errorOutput = new ByteArrayOutputStream()
+      }
+      output.toString('UTF-8').trim()
+    }
+    def assertCommit = { String name, File directory, String expected ->
+      assert readCommit.invoke(directory) == expected: name
+      logger.lifecycle('PASS: {}', name)
+    }
+    try {
+      def repository = new File(fixtureDir, 'repository with spaces')
+      repository.mkdirs()
+      git(repository, ['init'])
+      git(repository, ['commit', '--allow-empty', '-m', 'Initial fixture'])
+      def initialCommit = git(repository, ['rev-parse', '--verify', 'HEAD'])
+      assertCommit('normal branch', repository, initialCommit)
+
+      def detached = new File(fixtureDir, 'detached worktree')
+      git(repository, ['worktree', 'add', '--detach', detached.absolutePath, initialCommit])
+      assertCommit('detached worktree with an absolute gitdir', detached, initialCommit)
+
+      def named = new File(fixtureDir, 'named worktree')
+      git(repository, ['worktree', 'add', '-b', 'build-info-test', named.absolutePath, initialCommit])
+      git(named, ['commit', '--allow-empty', '-m', 'Worktree-only commit'])
+      def branchCommit = git(named, ['rev-parse', '--verify', 'HEAD'])
+      assert branchCommit != initialCommit
+      assertCommit('named worktree with a shared branch ref', named, branchCommit)
+
+      git(repository, ['pack-refs', '--all'])
+      assertCommit('normal branch with packed refs', repository, initialCommit)
+      assertCommit('worktree branch with packed refs', named, branchCommit)
+
+      def gitFile = new File(detached, '.git')
+      def gitDirectory = new File(gitFile.text.trim().substring('gitdir: '.length()))
+      def relativeGitDirectory = detached.toPath().relativize(gitDirectory.toPath())
+      gitFile.text = 'gitdir: ' + relativeGitDirectory + '\n'
+      assertCommit('worktree with a relative gitdir', detached, initialCommit)
+
+      def parent = new File(fixtureDir, 'parent repository')
+      parent.mkdirs()
+      git(parent, ['init'])
+      git(parent, ['-c', 'protocol.file.allow=always', 'submodule', 'add', repository.absolutePath, 'submodule'])
+      def submodule = new File(parent, 'submodule')
+      assertCommit('submodule with a relative gitdir', submodule, initialCommit)
+
+      git(repository, ['checkout', '--detach', initialCommit])
+      assertCommit('normal detached HEAD', repository, initialCommit)
+
+      def sourceArchive = new File(repository, 'source archive without git metadata')
+      sourceArchive.mkdirs()
+      assertCommit('source archive does not inherit its parent repository commit', sourceArchive, '')
+
+      def unborn = new File(fixtureDir, 'unborn repository')
+      unborn.mkdirs()
+      git(unborn, ['init'])
+      assertCommit('repository without a commit keeps the empty fallback', unborn, '')
+
+      assertCommit('missing working directory keeps the empty fallback', new File(fixtureDir, 'missing'), '')
+    } finally {
+      project.delete(fixtureDir)
+    }
+  }
+}
+
+tasks.named('test') { dependsOn(gitCommitTests) }

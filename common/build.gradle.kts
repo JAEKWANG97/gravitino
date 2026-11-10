@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 
@@ -59,31 +60,23 @@ dependencies {
   testFixturesImplementation(libs.commons.lang3)
 }
 
-fun getGitCommitId(): String {
-  var gitCommitId: String
-  try {
-    val gitPath = File(rootDir.path, ".git")
-    val gitFolder = if (gitPath.isDirectory) {
-      gitPath
-    } else {
-      val content = gitPath.readText().trim()
-      File(rootDir.path, content.substringAfter("gitdir: ").trim())
+fun getGitCommitId(gitRoot: File = rootDir): String {
+  return try {
+    val output = ByteArrayOutputStream()
+    project.exec {
+      workingDir(gitRoot)
+      commandLine("git", "--git-dir", File(gitRoot, ".git").absolutePath, "rev-parse", "--verify", "HEAD")
+      standardOutput = output
+      errorOutput = ByteArrayOutputStream()
     }
-
-    val head = File(gitFolder, "HEAD").readText().split(":")
-    val isCommit = head.size == 1
-    gitCommitId = if (isCommit) {
-      head[0].trim()
-    } else {
-      val refHead = File(gitFolder, head[1].trim())
-      refHead.readText().trim()
-    }
+    output.toString(Charsets.UTF_8.name()).trim()
   } catch (e: Exception) {
-    println("WARN: Unable to get Git commit id : ${e.message}")
-    gitCommitId = ""
+    logger.warn("Unable to get Git commit id: ${e.message}")
+    ""
   }
-  return gitCommitId
 }
+
+extra["getGitCommitId"] = ::getGitCommitId
 
 val propertiesFile = "src/main/resources/gravitino-build-info.properties"
 fun writeProjectPropertiesFile() {
@@ -145,3 +138,5 @@ tasks {
     delete("$propertiesFile")
   }
 }
+
+apply(from = rootProject.file("dev/test-git-commit-id.gradle"))
